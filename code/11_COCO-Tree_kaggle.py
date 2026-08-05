@@ -18,6 +18,23 @@
 
 # %%
 import subprocess, sys
+
+# Kaggle thuong cap P100 (sm_60), nhung image PyTorch (>=2.5, cu126) DA BO sm_60
+# -> moi CUDA op fail ("no kernel image"). Phat hien P100 qua nvidia-smi roi cai
+# torch 2.4.1 (version cuoi cung con gom sm_60, cu121). PHAI lam o CELL DAU TIEN,
+# truoc khi import torch -> khong can restart kernel. Tren T4: giu nguyen image torch.
+def _gpu_name():
+    try:
+        return subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                               capture_output=True, text=True).stdout.strip().lower()
+    except Exception:
+        return ""
+if "p100" in _gpu_name():
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+                    "torch==2.4.1", "torchvision==0.19.1",
+                    "--index-url", "https://download.pytorch.org/whl/cu121"], check=False)
+    print("P100 detected -> installed torch 2.4.1+cu121 (sm_60 support)")
+
 subprocess.run([sys.executable, "-m", "pip", "install", "-q",
                 "transformers>=4.45", "qwen-vl-utils", "peft", "bitsandbytes",
                 "accelerate", "datasets", "scikit-learn", "pandas", "pillow", "kagglehub"],
@@ -67,7 +84,7 @@ GQA_IMG_CANDIDATES = [
 # ---- COCO-Tree hyperparams (paper + adaptation cho compute) ----
 M       = 2     # so morphological entity (SMD). Paper M=2.
 S       = 2     # split factor (RCE). Paper S=3 -> giam xuong 2 cho compute.
-L       = 1     # do sau tree (RCE). Paper L=3 -> giam xuong 1 cho compute Kaggle n=200.
+L       = 2     # do sau tree (RCE). Paper L=3 -> adaptation L=2 (giam tu 3 cho compute Kaggle).
 ALPHA   = 0.6   # trong so LS trong composite score CS. Paper alpha=0.6 (Winoground).
 BETA    = 0.8   # trong so System-1 trong fusion. Paper beta=0.8.
 K_CAND  = 2     # so candidate answer sinh ra de rerank.
@@ -84,6 +101,22 @@ if SMOKE:
     print(f"!! SMOKE MODE -> N_EVAL={N_EVAL}, K_CAND={K_CAND}, S={S}, L={L}")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# ---- dtype + quant + attn theo GPU ----
+#  - T4/Turing (cap 7.x) KHONG co kernel bf16 -> fp16; Ampere+ (>=8) -> bf16.
+#  - bitsandbytes 4-bit can sm_70+. Kaggle dang cap P100 (cap 6.0) -> bnb 4-bit crash
+#    (DeadKernelError). Tat 4-bit, load fp16 (Qwen2.5-VL-3B ~7.6GB vua 16GB). Tren T4+ giu 4-bit.
+if torch.cuda.is_available():
+    _cap = torch.cuda.get_device_capability()[0]
+    TORCH_DTYPE = torch.bfloat16 if _cap >= 8 else torch.float16
+    USE_4BIT = USE_4BIT and (_cap >= 7)            # P100 (sm_60) khong chay duoc bnb 4-bit
+    ATTN_IMPL = "sdpa" if _cap >= 7 else "eager"   # P100: sdpa fallback cham -> dung eager
+else:
+    TORCH_DTYPE = torch.float32
+    USE_4BIT = False
+    ATTN_IMPL = "eager"
+print(f"GPU cap={torch.cuda.get_device_capability() if torch.cuda.is_available() else 'cpu'} "
+      f"-> dtype={TORCH_DTYPE}, 4bit={USE_4BIT}, attn={ATTN_IMPL}")
 
 
 # %% [markdown]
@@ -189,13 +222,13 @@ from transformers import (Qwen2_5_VLForConditionalGeneration, AutoProcessor,
 
 def _bnb():
     return BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                              bnb_4bit_compute_dtype=torch.bfloat16,
+                              bnb_4bit_compute_dtype=TORCH_DTYPE,   # T4 (cap<8) -> fp16; bf16 tren T4 crash
                               bnb_4bit_use_double_quant=True) if USE_4BIT else None
 
 print("Loading VLM (Qwen2.5-VL-3B) ...")
 vlm = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    MODEL_ID, quantization_config=_bnb(), torch_dtype=torch.bfloat16,
-    device_map="auto", attn_implementation="sdpa")
+    MODEL_ID, quantization_config=_bnb(), torch_dtype=TORCH_DTYPE,
+    device_map={"": 0}, attn_implementation=ATTN_IMPL)   # P100(sm60)->eager, T4+->sdpa
 vlm.eval()
 processor = AutoProcessor.from_pretrained(MODEL_ID)
 vtok = processor.tokenizer
@@ -212,8 +245,8 @@ rtok = None
 if USE_SEPARATE_REASONER:
     print("Loading LLM reasoner (Qwen2.5-3B-Instruct) ...")
     reasoner = AutoModelForCausalLM.from_pretrained(
-        REASONER_ID, quantization_config=_bnb(), torch_dtype=torch.bfloat16,
-        device_map="auto")
+        REASONER_ID, quantization_config=_bnb(), torch_dtype=TORCH_DTYPE,
+        device_map={"": 0}, attn_implementation=ATTN_IMPL)
     reasoner.eval()
     rtok = AutoTokenizer.from_pretrained(REASONER_ID)
     YES_R = _first_tok(rtok, "Yes"); NO_R = _first_tok(rtok, "No")
@@ -331,17 +364,22 @@ def _agg(vals):
         return 0.0
     return sum(vals)/len(vals) if PATH_AGG == "mean" else sum(vals)
 
-def search_greedy(entities):
+def _roots(all_nodes):
+    """Node goc level-0 (cac entity) — da duoc score_nodes gan 'cs'. Lay node DICT, khong phai string."""
+    return [n for n in all_nodes if n.get("level", 0) == 0]
+
+def search_greedy(all_nodes):
     best = 0.0
-    for e in entities:
+    for e in _roots(all_nodes):
         path = [e]; cur = e
         while cur["children"]:
             cur = max(cur["children"], key=lambda n: n["cs"]); path.append(cur)
         best = max(best, _agg([n["cs"] for n in path]))
     return best
 
-def search_beam(entities, all_nodes, k=BEAM_K):
-    beams = [([e], _agg([e["cs"]])) for e in entities] if entities else [([], 0.0)]
+def search_beam(all_nodes, k=BEAM_K):
+    roots = _roots(all_nodes)
+    beams = [([e], _agg([e["cs"]])) for e in roots] if roots else [([], 0.0)]
     maxdepth = max((n["level"] for n in all_nodes), default=0)
     for _ in range(maxdepth):
         cand = []
@@ -407,7 +445,7 @@ def score_candidate(image, question, cand):
                          images=[image])[0]
     entities, all_nodes = build_tree(statement)
     score_nodes(image, statement, entities, all_nodes)
-    W = search_greedy(entities) if SEARCH_MODE == "greedy" else search_beam(entities, all_nodes)
+    W = search_greedy(all_nodes) if SEARCH_MODE == "greedy" else search_beam(all_nodes)
     final = BETA * f_sys1 + (1 - BETA) * W      # Eq 8
     return final, f_sys1, W
 

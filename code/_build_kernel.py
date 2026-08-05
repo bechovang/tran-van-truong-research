@@ -18,7 +18,7 @@ MAIN    = 'kernels/llava_cot_12/12_LLaVA-CoT_kaggle.ipynb'
 PUSH_DIR = 'kernels/llava_cot_12/push'
 PUSH    = os.path.join(PUSH_DIR, '12_LLaVA-CoT_kaggle.ipynb')
 
-FORCE_SMOKE = True   # True: push chay SMOKE (n=4, 2 steps) de bat bug truoc. False: full run.
+FORCE_SMOKE = os.environ.get("FORCE_SMOKE", "1") != "0"   # 1=smoke(n=4,2steps) bat bug; 0=full run. Default smoke.
 
 KAGGLE_ID = "bechovang/12-llava-cot"
 
@@ -237,9 +237,8 @@ def main():
         "enable_internet": True,
         "dataset_sources": [GQA_IMAGES_DATASET],
         "kernel_sources": [VISUAL_COT_KERNEL],
-        "machine_shape": "Gpu",
-        # FIX (2026-08-06): image "original" (pin cu) -> Kaggle cap P100 (sm_60),
-        # PyTorch/bitsandbytes (sm_70+) crash. "latest" -> T4 x2 + image moi.
+        "machine_shape": "GPU_T4_X2",       # T4 x2 (sm_75). "Gpu" generic -> Kaggle cap P100 (sm_60),
+        # ma latest image PyTorch chi support sm_70+ -> moi CUDA op fail ("no kernel image").
         "docker_image_pinning_type": "latest",
     }
     os.makedirs(PUSH_DIR, exist_ok=True)

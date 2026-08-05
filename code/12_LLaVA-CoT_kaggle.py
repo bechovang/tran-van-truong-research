@@ -15,10 +15,31 @@
 # %%
 # ---- Cai dat deps (Kaggle default image co the co transformers cu; Qwen2.5-VL can >=4.45) ----
 import subprocess, sys
+
+# Kaggle thuong cap P100 (sm_60), nhung image PyTorch (>=2.5, cu126) DA BO sm_60
+# -> moi CUDA op fail ("no kernel image"). Phat hien P100 qua nvidia-smi roi cai
+# torch 2.4.1 (version cuoi cung con gom sm_60, cu121). PHAI lam o CELL DAU TIEN,
+# truoc khi import torch -> khong can restart kernel. Tren T4: giu nguyen image torch.
+def _gpu_name():
+    try:
+        return subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                               capture_output=True, text=True).stdout.strip().lower()
+    except Exception:
+        return ""
+if "p100" in _gpu_name():
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+                    "torch==2.4.1", "torchvision==0.19.1",
+                    "--index-url", "https://download.pytorch.org/whl/cu121"], check=False)
+    print("P100 detected -> installed torch 2.4.1+cu121 (sm_60 support)")
+
 subprocess.run([sys.executable, "-m", "pip", "install", "-q",
                 "transformers>=4.45", "qwen-vl-utils", "peft", "bitsandbytes",
                 "accelerate", "datasets", "scikit-learn", "pandas", "pillow", "kagglehub"],
                check=False)
+# peft moi gate torchao>=0.16; image co torchao 0.10.0 -> get_peft_model crash.
+# LoRA khong can torchao -> go bo, peft bo qua dispatcher torchao.
+subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "torchao"],
+               check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 print("deps ready")
 
 
@@ -86,6 +107,25 @@ SWIRES_N        = 2
 SWIRES_MAX_RETRACE = 1
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# ---- dtype + quant + attn chon theo GPU ----
+#  - T4/Turing (cap 7.x) KHONG co kernel bf16 -> fp16; Ampere+ (>=8) -> bf16.
+#  - bitsandbytes 4-bit can sm_70+. Kaggle dang cap P100 (cap 6.0) -> bnb 4-bit crash
+#    (DeadKernelError). Tat 4-bit, load fp16 (Qwen2.5-VL-3B ~7.6GB vua 16GB). Tren T4+ thi
+#    van giu 4-bit (giong QLoRA paper).
+if torch.cuda.is_available():
+    _cap = torch.cuda.get_device_capability()[0]
+    TORCH_DTYPE = torch.bfloat16 if _cap >= 8 else torch.float16
+    USE_BF16, USE_FP16 = (_cap >= 8), (_cap < 8)
+    USE_4BIT = USE_4BIT and (_cap >= 7)            # P100 (sm_60) khong chay duoc bnb 4-bit
+    ATTN_IMPL = "sdpa" if _cap >= 7 else "eager"   # P100: sdpa fallback cham -> dung eager
+else:
+    TORCH_DTYPE = torch.float32
+    USE_BF16, USE_FP16 = False, False
+    USE_4BIT = False
+    ATTN_IMPL = "eager"
+print(f"GPU cap={torch.cuda.get_device_capability() if torch.cuda.is_available() else 'cpu'} "
+      f"-> dtype={TORCH_DTYPE}, bf16={USE_BF16}, fp16={USE_FP16}, 4bit={USE_4BIT}, attn={ATTN_IMPL}")
 
 
 # %% [markdown]
@@ -256,14 +296,19 @@ def build_model_and_processor():
         bnb = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_compute_dtype=TORCH_DTYPE,     # T4 (cap<8) -> fp16; bf16 tren T4 crash
             bnb_4bit_use_double_quant=True,
         )
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        MODEL_ID, quantization_config=bnb, torch_dtype=torch.bfloat16,
-        device_map="auto", attn_implementation="sdpa",
+        MODEL_ID, quantization_config=bnb, torch_dtype=TORCH_DTYPE,
+        device_map={"": 0},                         # 1 GPU; tranh sharding xung dot Trainer
+        attn_implementation=ATTN_IMPL,              # P100(sm60)->eager, T4+->sdpa
     )
-    model = prepare_model_for_kbit_training(model)
+    if USE_4BIT:
+        model = prepare_model_for_kbit_training(model)
+    else:
+        model.config.use_cache = False
+        model.enable_input_require_grads()          # fp16-no-quant (P100): can cho gradient_checkpointing
     # LoRA chi len LLM (vision encoder frozen) — giong paper "visual encoder frozen"
     peft_cfg = LoraConfig(
         r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT, bias="none",
@@ -358,12 +403,8 @@ eval_list_raw = raw_eval if len(raw_eval) > 0 else raw_train
 # %%
 train_time = 0.0
 if len(train_list) >= BATCH_SIZE:
-    # FIX: P100 (Kaggle) khong ho tro bf16 -> tu chon dtype theo capability.
-    #   Ampere+ (>=8.0): bf16; Turing/Volta (7.x/6.x): fp16 (dung 4-bit + fp16).
-    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
-        use_bf16, use_fp16 = True, False
-    else:
-        use_bf16, use_fp16 = False, True
+    # dtype da chon o CONFIG (TORCH_DTYPE/USE_BF16/USE_FP16); phai DONG NHAT voi
+    # torch_dtype (load) + bnb_4bit_compute_dtype (dequant). T4 (cap 7.5) -> fp16.
     args = TrainingArguments(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=BATCH_SIZE,
@@ -372,9 +413,9 @@ if len(train_list) >= BATCH_SIZE:
         learning_rate=LR,
         logging_steps=4,
         save_strategy="no",
-        bf16=use_bf16,
-        fp16=use_fp16,
-        optim="paged_adamw_8bit",
+        bf16=USE_BF16,
+        fp16=USE_FP16,
+        optim=("paged_adamw_8bit" if USE_4BIT else "adamw_torch"),  # P100 (no bnb) -> adamw_torch
         report_to=[],
         gradient_checkpointing=True,
         remove_unused_columns=False,

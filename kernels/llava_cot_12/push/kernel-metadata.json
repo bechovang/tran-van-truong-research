@@ -13,6 +13,6 @@
   "kernel_sources": [
     "khoangoo/test-dataset-visual-cot"
   ],
-  "machine_shape": "Gpu",
+  "machine_shape": "GPU_T4_X2",
   "docker_image_pinning_type": "latest"
 }

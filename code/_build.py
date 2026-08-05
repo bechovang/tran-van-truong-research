@@ -133,7 +133,8 @@ def build(num, force_smoke=True):
             "enable_internet": True,
             "dataset_sources": cfg["dataset_sources"],
             "kernel_sources": cfg["kernel_sources"],
-            "machine_shape": "Gpu",
+            "machine_shape": "GPU_T4_X2",   # T4 x2 (sm_75). "Gpu" generic -> Kaggle cap P100 (sm_60),
+            # ma latest image PyTorch chi support sm_70+ -> moi CUDA op fail ("no kernel image").
             "docker_image_pinning_type": "latest"}
     os.makedirs(push_dir, exist_ok=True)
     with io.open(os.path.join(push_dir, 'kernel-metadata.json'), 'w', encoding='utf-8') as f:
