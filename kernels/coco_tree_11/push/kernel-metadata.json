@@ -1,0 +1,17 @@
+{
+  "id": "bechovang/11-coco-tree",
+  "title": "11 COCO-Tree",
+  "code_file": "11_COCO-Tree_kaggle.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "lyte69/gqa-images"
+  ],
+  "kernel_sources": [
+    "khoangoo/test-dataset-visual-cot"
+  ],
+  "machine_shape": "GPU_T4_X2"
+}

@@ -1,0 +1,18 @@
+{
+  "id": "bechovang/12-llava-cot",
+  "title": "12 LLaVA-CoT",
+  "code_file": "12_LLaVA-CoT_kaggle.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "lyte69/gqa-images"
+  ],
+  "kernel_sources": [
+    "khoangoo/test-dataset-visual-cot"
+  ],
+  "machine_shape": "Gpu",
+  "docker_image_pinning_type": "latest"
+}

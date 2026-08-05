@@ -1,0 +1,22 @@
+# --- Large / regenerable (excluded to stay under GitHub's limits) ---
+*.zip
+hf_cache/
+.commandcode/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# --- Logs & scratch ---
+*.log
+_*_dump.txt
+_nb_extract.py
+_bechovang_dump.txt
+_pulled_dump.txt
+_sheet_dump.txt
+_template_dump.txt
+
+# --- OS ---
+.DS_Store
+Thumbs.db
