@@ -65,8 +65,8 @@ USE_4BIT  = True
 # De tiet kiem RAM/toc do tren Kaggle, o day ta DUNG CHINH Qwen2.5-VL-3B cho ca
 # vision (VS, candidate) va text (SMD/RCE/LS). Dat USE_SEPARATE_REASONER=True de
 # load them Qwen2.5-3B-Instruct lam reasoner (gan paper hon).
-USE_SEPARATE_REASONER = False
-REASONER_ID = "Qwen/Qwen2.5-3B-Instruct"
+USE_SEPARATE_REASONER = True                       # paper dung 1 LLM reasoner rieng (Llama-3.1-8B) cho SMD/RCE/LS
+REASONER_ID = "Qwen/Qwen2.5-1.5B-Instruct"         # 1.5B (vua fp16 canh Qwen-VL-3B tren P100 16GB; paper: Llama-3.1-8B)
 
 # ---- Dataset (VISUAL COT - GQA subset, giong #12) ----
 DATASET_HF      = "deepcs233/Visual-CoT"
@@ -319,15 +319,27 @@ def parse_numbered(text, expected):
             items.append(m.group(1).strip())
     return items[:expected] if items else []
 
+@torch.no_grad()
+def gen_reasoner(prompt, max_new=64):
+    """Generate text-only bang LLM reasoner RIENG (paper: SMD/RCE/LS dung 1 LLM rieng).
+    Neu USE_SEPARATE_REASONER=False -> fallback VLM text-only."""
+    if USE_SEPARATE_REASONER:
+        full = rtok.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)
+        inp = rtok(full, return_tensors="pt")
+        inp = {k: v.to(reasoner.device) for k, v in inp.items()}
+        out = reasoner.generate(**inp, max_new_tokens=max_new, do_sample=False)
+        return rtok.decode(out[0, inp["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+    return generate(prompt, max_new=max_new)
+
 def smd(caption):
     """Semantic Morphological Decomposition -> M entity."""
-    out = generate(SMD_PROMPT.format(M=M, C=caption), max_new=64)
+    out = gen_reasoner(SMD_PROMPT.format(M=M, C=caption), max_new=64)
     ents = parse_numbered(out, M)
     return ents if ents else [caption]
 
 def rce(node, caption):
     """Recursive Concept Exploration -> S concept con."""
-    out = generate(RCE_PROMPT.format(S=S, NODE=node, C=caption), max_new=80)
+    out = gen_reasoner(RCE_PROMPT.format(S=S, NODE=node, C=caption), max_new=80)
     return parse_numbered(out, S)
 
 def build_tree(statement):
@@ -542,7 +554,7 @@ result = pd.DataFrame([{
              f"(alpha={ALPHA}) -> {SEARCH_MODE} path -> fuse beta*f+(1-beta)*W (beta={BETA})). "
              f"ROC/PR-AUC candidate-level (gold vs distractor). "
              f"Tree size (M={M},S={S},L={L}) giam tu paper (2,3,3) cho compute Kaggle. "
-             f"ASSUMPTION: beam k={BEAM_K}, path agg={PATH_AGG}; reasoner dung chinh VLM (paper: Llama-3.1-8B). "
+             f"ASSUMPTION: beam k={BEAM_K}, path agg={PATH_AGG}; reasoner rieng Qwen2.5-1.5B-Instruct (paper: Llama-3.1-8B). "
              f"adaptation, not full COCO-Tree reproduction (paper: 4 comp benchmarks, VQAScore metric)."),
 }])
 result.to_csv("result_11_COCO-Tree.csv", index=False)

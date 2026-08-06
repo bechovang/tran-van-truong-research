@@ -63,6 +63,7 @@ SMOKE = True          # <-- True: smoke (n=4). False: full (n=200).
 
 MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 USE_4BIT  = True
+CLIP_ID   = "openai/clip-vit-large-patch32"   # text encoder cho retrieval (paper §A.6: CLIP cosine)
 
 DATASET_HF      = "deepcs233/Visual-CoT"
 GQA_TRAIN_JSONL = "cot_with_detailed_reasoning_steps/gqa_cot_train.jsonl"
@@ -217,6 +218,19 @@ processor = AutoProcessor.from_pretrained(MODEL_ID)
 vtok = processor.tokenizer
 print("VLM ready.")
 
+# CLIP text encoder cho retrieval sub-MMKG (paper §A.6: cosine similarity tren CLIP space)
+from transformers import CLIPTextModel, CLIPTokenizer
+_clip = CLIPTextModel.from_pretrained(CLIP_ID, torch_dtype=TORCH_DTYPE).to(vlm.device).eval()
+_cliptok = CLIPTokenizer.from_pretrained(CLIP_ID)
+print("CLIP text encoder ready (retrieval).")
+
+@torch.no_grad()
+def _embed_text(texts):
+    t = _cliptok(texts, padding=True, truncation=True, max_length=77, return_tensors="pt").to(_clip.device)
+    out = _clip(**t)
+    f = out.pooler_output if (hasattr(out, "pooler_output") and out.pooler_output is not None) else out.last_hidden_state[:, 0]
+    return torch.nn.functional.normalize(f.float(), dim=-1)
+
 
 # %% [markdown]
 # ## 4. MMKG construction + Top-N retrieval + knowledge-injected VQA
@@ -276,17 +290,25 @@ def build_mmkg(image):
     return mmkg[:MAX_TRIP]
 
 def retrieve_topn(mmkg, question, n=TOPN):
-    """Rank triplet theo do lien quan voi cau hoi (token overlap). Tra Top-N (sub-MMKG)."""
-    qtoks = set(re.findall(r"[a-z0-9]+", question.lower()))
-    stop = {"the","a","an","is","are","of","in","on","at","to","what","who","where","how","this","that","with","and"}
-    qtoks -= stop
-    def score(t):
-        ttoks = set(t[0].split()) | set(t[1].split()) | set(t[2].split())
-        return len(qtoks & ttoks)
-    ranked = sorted(mmkg, key=score, reverse=True)
-    # uu tien triplet co overlap > 0; neu tat ca =0 thi lay top n dau (MMKG thong tin chung)
-    hit = [t for t in ranked if score(t) > 0]
-    return (hit[:n] if hit else ranked[:n])
+    """Sub-MMKG retrieval theo paper §A.6: CLIP cosine similarity question vs triple
+    -> Top-n' candidate -> lay 1-hop neighbour (triple chia entity) -> rerank cosine -> Top-N."""
+    if not mmkg:
+        return []
+    trip_strs = [f"{s} {p} {o}" for (s, p, o) in mmkg]
+    tt = _embed_text(trip_strs)          # (T, D)
+    qt = _embed_text([question])         # (1, D)
+    sims = (qt @ tt.T).squeeze(0).tolist()   # (T,)
+    order = sorted(range(len(mmkg)), key=lambda i: -sims[i])
+    nn = min(len(mmkg), max(n * 2, 6))   # Top-n' candidate
+    cand = set(order[:nn])
+    ents = set()
+    for i in cand:
+        ents |= set(mmkg[i][0].split()) | set(mmkg[i][2].split())
+    # 1-hop: cand + cac triple chia entity voi cand
+    hop = [i for i in range(len(mmkg))
+           if i in cand or (set(mmkg[i][0].split()) & ents) or (set(mmkg[i][2].split()) & ents)]
+    hop = sorted(set(hop), key=lambda i: -sims[i])
+    return [mmkg[i] for i in hop[:n]]
 
 def knowledge_ctx(triples):
     if not triples:
@@ -399,7 +421,7 @@ result = pd.DataFrame([{
              f"ADAPTATION: MR-MKG goc = RGAT tren MMKG + knowledge adapter + cross-modal align + QLoRA "
              f"(LLM+visual frozen, train ~2.25%), dung scene graph VG, ScienceQA/MARS. -> Adapt: "
              f"build MMKG tu scene graph do VLM sinh ({M_SEQ} seq, p={TOP_P}) -> retrieve Top-{TOPN} "
-             f"triple lien quan cau hoi (overlap; giong sub-MMKG retrieval paper) -> inject nhu knowledge "
+             f"triple bang CLIP cosine + 1-hop (paper §A.6; giong sub-MMKG retrieval) -> inject nhu knowledge "
              f"context (RGAT+adapter -> prompt, do KHONG co sceneGraphs.json va RGAT nang) -> VQA. "
              f"KHONG dung truong reasoning/thought (gold-leaking). "
              f"Knowledge-inj Acc={acc:.4f}" + (f"; baseline Acc={acc_base:.4f} (gain {acc-acc_base:+.4f})" if acc_base is not None else "") +
