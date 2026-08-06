@@ -112,7 +112,7 @@ CONFIGS = {
     "14": {
         "src": "code/14_MR-MKG_kaggle.py",
         "kernel_dir": "kernels/mrmkg_14",
-        "kaggle_id": "bechovang/14-mrmkg",
+        "kaggle_id": "bechovang/14-mr-mkg",
         "title": "14 MR-MKG",
         "dataset_sources": ["lyte69/gqa-images"],
         "kernel_sources": ["khoangoo/test-dataset-visual-cot"],
