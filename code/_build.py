@@ -101,7 +101,23 @@ CONFIGS = {
         "dataset_sources": ["lyte69/gqa-images"],
         "kernel_sources": ["khoangoo/test-dataset-visual-cot"],
     },
-    # "13": {...}, "14": {...}, "15": {...}  -- them sau
+    "13": {
+        "src": "code/13_Pix2Graph_kaggle.py",
+        "kernel_dir": "kernels/pix2graph_13",
+        "kaggle_id": "bechovang/13-pix2graph",
+        "title": "13 Pix2Graph",
+        "dataset_sources": ["lyte69/gqa-images"],
+        "kernel_sources": ["khoangoo/test-dataset-visual-cot"],
+    },
+    "14": {
+        "src": "code/14_MR-MKG_kaggle.py",
+        "kernel_dir": "kernels/mrmkg_14",
+        "kaggle_id": "bechovang/14-mrmkg",
+        "title": "14 MR-MKG",
+        "dataset_sources": ["lyte69/gqa-images"],
+        "kernel_sources": ["khoangoo/test-dataset-visual-cot"],
+    },
+    # "15": {...}  -- them sau
 }
 
 def build(num, force_smoke=True):

@@ -89,11 +89,11 @@ LORA_R          = 8                                   # team protocol: QLoRA r=8
 LORA_ALPHA      = 16
 LORA_DROPOUT    = 0.05
 MAX_STEPS       = 32                                  # team protocol ~32 steps
-LR              = 2e-4                                # ASSUMPTION: paper khong noi ro Appendix C trong version nay
+LR              = 1e-4                                # giam tu 2e-4 (fp16 de collapse/divergence)
 BATCH_SIZE      = 1
 GRAD_ACCUM      = 4                                   # effective batch 4
 MAX_LEN         = 1024
-MAX_PIXELS      = 602112                              # ~ giong default Qwen2.5-VL fine-tune
+MAX_PIXELS      = 200704                              # giam tu 602112: vision encoder fp16 de NaN o pixel cao (P100 khong co bf16)
 OUTPUT_DIR      = "./llava_cot_out"
 
 if SMOKE:
@@ -412,11 +412,14 @@ if len(train_list) >= BATCH_SIZE:
         max_steps=MAX_STEPS,
         learning_rate=LR,
         logging_steps=4,
+        max_grad_norm=0.5,        # fp16 stability (fix training collapse)
+        warmup_ratio=0.1,         # warm up LR de tranh divergence buoc dau
         save_strategy="no",
         bf16=USE_BF16,
         fp16=USE_FP16,
         optim=("paged_adamw_8bit" if USE_4BIT else "adamw_torch"),  # P100 (no bnb) -> adamw_torch
         report_to=[],
+        disable_tqdm=True,       # in loss tung dong (PrinterCallback) de thay loss curve thay vi tqdm bar
         gradient_checkpointing=True,
         remove_unused_columns=False,
     )
