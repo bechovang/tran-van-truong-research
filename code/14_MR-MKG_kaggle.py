@@ -63,7 +63,7 @@ SMOKE = True          # <-- True: smoke (n=4). False: full (n=200).
 
 MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 USE_4BIT  = True
-CLIP_ID   = "openai/clip-vit-large-patch32"   # text encoder cho retrieval (paper §A.6: CLIP cosine)
+CLIP_ID   = "openai/clip-vit-large-patch14"   # CLIP ViT-L (paper §3.2/§A.6). Luu y: ViT-L la patch14 (KHONG co patch32).
 
 DATASET_HF      = "deepcs233/Visual-CoT"
 GQA_TRAIN_JSONL = "cot_with_detailed_reasoning_steps/gqa_cot_train.jsonl"
@@ -218,11 +218,29 @@ processor = AutoProcessor.from_pretrained(MODEL_ID)
 vtok = processor.tokenizer
 print("VLM ready.")
 
-# CLIP text encoder cho retrieval sub-MMKG (paper §A.6: cosine similarity tren CLIP space)
+# CLIP text encoder cho retrieval sub-MMKG (paper §A.6: cosine similarity tren CLIP space).
+# Kaggle thuong fail download HF -> co fallback keyword retrieval.
 from transformers import CLIPTextModel, CLIPTokenizer
-_clip = CLIPTextModel.from_pretrained(CLIP_ID, torch_dtype=TORCH_DTYPE).to(vlm.device).eval()
-_cliptok = CLIPTokenizer.from_pretrained(CLIP_ID)
-print("CLIP text encoder ready (retrieval).")
+CLIP_OK = False
+_clip = _cliptok = None
+for _ep in (None, "https://hf-mirror.com"):
+    try:
+        if _ep:
+            os.environ["HF_ENDPOINT"] = _ep
+            try:
+                import huggingface_hub.constants as _hc
+                _hc.ENDPOINT = _ep; _hc.HF_HUB_ENDPOINT = _ep
+            except Exception:
+                pass
+        _clip = CLIPTextModel.from_pretrained(CLIP_ID, torch_dtype=TORCH_DTYPE).to(vlm.device).eval()
+        _cliptok = CLIPTokenizer.from_pretrained(CLIP_ID)
+        CLIP_OK = True
+        print("CLIP text encoder ready (retrieval).")
+        break
+    except Exception as e:
+        print(f"CLIP load attempt failed: {repr(e)[:110]}")
+if not CLIP_OK:
+    print("!! CLIP khong load duoc -> fallback keyword retrieval (it trung thuat hon paper §A.6).")
 
 @torch.no_grad()
 def _embed_text(texts):
@@ -291,9 +309,15 @@ def build_mmkg(image):
 
 def retrieve_topn(mmkg, question, n=TOPN):
     """Sub-MMKG retrieval theo paper §A.6: CLIP cosine similarity question vs triple
-    -> Top-n' candidate -> lay 1-hop neighbour (triple chia entity) -> rerank cosine -> Top-N."""
+    -> Top-n' candidate -> lay 1-hop neighbour (triple chia entity) -> rerank cosine -> Top-N.
+    Neu CLIP khong load duoc -> fallback keyword overlap."""
     if not mmkg:
         return []
+    if not CLIP_OK:
+        qtoks = set(re.findall(r"[a-z0-9]+", question.lower())) - \
+                {"the","a","an","is","are","of","in","on","at","to","what","who","where","how","this","that","with","and"}
+        def _sc(t): return len(qtoks & (set(t[0].split()) | set(t[1].split()) | set(t[2].split())))
+        return sorted(mmkg, key=_sc, reverse=True)[:n]
     trip_strs = [f"{s} {p} {o}" for (s, p, o) in mmkg]
     tt = _embed_text(trip_strs)          # (T, D)
     qt = _embed_text([question])         # (1, D)

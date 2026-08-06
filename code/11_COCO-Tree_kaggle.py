@@ -65,8 +65,8 @@ USE_4BIT  = True
 # De tiet kiem RAM/toc do tren Kaggle, o day ta DUNG CHINH Qwen2.5-VL-3B cho ca
 # vision (VS, candidate) va text (SMD/RCE/LS). Dat USE_SEPARATE_REASONER=True de
 # load them Qwen2.5-3B-Instruct lam reasoner (gan paper hon).
-USE_SEPARATE_REASONER = True                       # paper dung 1 LLM reasoner rieng (Llama-3.1-8B) cho SMD/RCE/LS
-REASONER_ID = "Qwen/Qwen2.5-1.5B-Instruct"         # 1.5B (vua fp16 canh Qwen-VL-3B tren P100 16GB; paper: Llama-3.1-8B)
+USE_SEPARATE_REASONER = False                      # paper dung 1 LLM reasoner rieng (Llama-3.1-8B); tren P100 fp16 reasoner rieng (1.5B) y hon VLM -> giu VLM-lam-reasoner (Acc cao hon)
+REASONER_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 
 # ---- Dataset (VISUAL COT - GQA subset, giong #12) ----
 DATASET_HF      = "deepcs233/Visual-CoT"
@@ -276,6 +276,7 @@ def yesno_batch(texts, images=None, use_reasoner=False):
     if not texts:
         return []
     last = _last_logits(texts, images=images, use_reasoner=use_reasoner)
+    last = torch.nan_to_num(last, nan=0.0, posinf=0.0, neginf=0.0)   # guard fp16 NaN (reasoner logits)
     yes_id = (YES_R if (use_reasoner and USE_SEPARATE_REASONER) else YES_VL)
     no_id  = (NO_R  if (use_reasoner and USE_SEPARATE_REASONER) else NO_VL)
     ly = last[:, yes_id]; ln = last[:, no_id]
@@ -554,7 +555,7 @@ result = pd.DataFrame([{
              f"(alpha={ALPHA}) -> {SEARCH_MODE} path -> fuse beta*f+(1-beta)*W (beta={BETA})). "
              f"ROC/PR-AUC candidate-level (gold vs distractor). "
              f"Tree size (M={M},S={S},L={L}) giam tu paper (2,3,3) cho compute Kaggle. "
-             f"ASSUMPTION: beam k={BEAM_K}, path agg={PATH_AGG}; reasoner rieng Qwen2.5-1.5B-Instruct (paper: Llama-3.1-8B). "
+             f"ASSUMPTION: beam k={BEAM_K}, path agg={PATH_AGG}; reasoner = chinh VLM (paper: Llama-3.1-8B rieng; rieng-1.5B y hon tren P100). "
              f"adaptation, not full COCO-Tree reproduction (paper: 4 comp benchmarks, VQAScore metric)."),
 }])
 result.to_csv("result_11_COCO-Tree.csv", index=False)
