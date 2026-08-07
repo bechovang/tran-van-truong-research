@@ -1,0 +1,18 @@
+{
+  "id": "bechovang/15-llm4sgg",
+  "title": "15 LLM4SGG",
+  "code_file": "15_LLM4SGG_kaggle.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "lyte69/gqa-images"
+  ],
+  "kernel_sources": [
+    "khoangoo/test-dataset-visual-cot"
+  ],
+  "machine_shape": "GPU_T4_X2",
+  "docker_image_pinning_type": "latest"
+}
