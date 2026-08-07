@@ -88,7 +88,7 @@ N_EVAL          = 200
 LORA_R          = 8                                   # team protocol: QLoRA r=8
 LORA_ALPHA      = 16
 LORA_DROPOUT    = 0.05
-MAX_STEPS       = 32                                  # team protocol ~32 steps
+MAX_STEPS       = 64                                  # 32 undertrained 4-stage format -> gen rac; bump len 1 epoch
 LR              = 1e-4                                # giam tu 2e-4 (fp16 de collapse/divergence)
 BATCH_SIZE      = 1
 GRAD_ACCUM      = 4                                   # effective batch 4
@@ -452,30 +452,62 @@ def extract_conclusion(text):
 
 @torch.no_grad()
 def predict(image, question):
+    # FIX: prompt PHAI KHOP voi training (collator) + sampling+rep_penalty de tranh
+    # greedy collapse sang token rac ('\\[', '---') sau QLoRA. max_new 256 (du 4-stage).
     messages = [{"role":"user","content":[
         {"type":"image","image":image},
-        {"type":"text","text": f"{question}\nThink step by step using <SUMMARY>,<CAPTION>,<REASONING>,<CONCLUSION> tags."},
+        {"type":"text","text": f"{question}\nPlease reason step by step and present the final answer within <CONCLUSION> ... </CONCLUSION>."},
     ]}]
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(messages)
     inputs = processor(text=[text], images=image_inputs, videos=video_inputs,
                        padding=True, return_tensors="pt").to(model.device)
-    out = model.generate(**inputs, max_new_tokens=384, do_sample=False)
+    out = model.generate(**inputs, max_new_tokens=256, do_sample=True,
+                         temperature=0.3, top_p=0.9, repetition_penalty=1.15)
     gen = tok.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
     return gen
 
-preds_raw, golds = [], []
+@torch.no_grad()
+def short_answer(image, question, cot):
+    """Stage-2 robust answer: phat sinh cau tra loi NGAN (1-5 words) dua tren CoT.
+    Dam bao EM-able khi <CONCLUSION> cua model bi verbose / thieu tag (Qwen2.5-VL-3B
+    thien verbose; paper Sec 3.1.1 cho phep conclusion ngan/dai tuy y)."""
+    cot_short = cot[:900] if len(cot) > 900 else cot
+    prompt = (f"Question: {question}\nReasoning: {cot_short}\n\n"
+              f"Based on the reasoning and the image, the final answer is (1-5 words only):")
+    messages = [{"role":"user","content":[
+        {"type":"image","image":image},
+        {"type":"text","text": prompt},
+    ]}]
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    image_inputs, video_inputs = process_vision_info(messages)
+    inputs = processor(text=[text], images=image_inputs, videos=video_inputs,
+                       padding=True, return_tensors="pt").to(model.device)
+    out = model.generate(**inputs, max_new_tokens=12, do_sample=False)
+    gen = tok.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+    return gen.strip().split("\n")[0].strip(" .,;:")
+
+model.eval()   # dam bao eval mode sau train (gradient_checkpointing / training state)
+preds_raw, preds_ans, golds = [], [], []   # raw=CoT(debug), ans=short answer(metric), golds
 n_eval = min(N_EVAL, len(eval_list_raw))
 for i in range(n_eval):
     try:
         img, q, tgt, gold = build_four_stage(eval_list_raw[i])
-        gen = predict(img, q)
-        preds_raw.append(gen); golds.append(str(gold))
-        if i % 25 == 0: print(f"[{i}/{n_eval}] gold={gold!r} concl={extract_conclusion(gen)!r}")
+        cot = predict(img, q)
+        preds_raw.append(cot); golds.append(str(gold))
+        concl = extract_conclusion(cot)
+        if concl and 1 <= len(norm_text(concl).split()) <= 6:
+            ans = concl                       # CONCLUSION da ngan (format da hoc) -> dung
+        else:
+            ans = short_answer(img, q, cot)   # verbose / thieu tag -> stage-2 short answer
+        preds_ans.append(ans)
+        if i % 25 == 0:
+            print(f"[{i}/{n_eval}] gold={gold!r} concl={concl[:50]!r} ans={ans!r}")
     except Exception as e:
-        print("eval err", i, e)
+        print(f"eval err {i}: {repr(e)[:120]}")
+        preds_raw.append(""); preds_ans.append(""); golds.append("")
 
-preds = [norm_text(extract_conclusion(g)) for g in preds_raw]
+preds = [norm_text(p) for p in preds_ans]
 gold_n = [norm_text(g) for g in golds]
 
 # --- Metrics ---
@@ -528,6 +560,8 @@ result = pd.DataFrame([{
     "Comm Cost": "N/A", "Training Steps": MAX_STEPS,
     "Note": (f"Qwen2.5-VL-3B; Visual CoT-GQA; train={N_TRAIN}; eval={n_eval}; "
              f"4-stage structured CoT SFT (QLoRA r=8); Acc=EM, macro P/R/F1 over gold classes; "
+             f"answer = <CONCLUSION> content neu ngan (<=6 words), nguoc lai stage-2 short-answer "
+             f"re-gen (Qwen thien verbose; paper Sec 3.1.1 conclusion ngan/dai tuy y); "
              f"adaptation, not full LLaVA-CoT reproduction (paper: Llama-3.2-11B full FT). "
              f"Appendix C/D (lr, SWIRES M/N/C/threshold) not in this paper version."),
 }])
@@ -536,6 +570,6 @@ result.to_csv(os.path.join(OUTPUT_DIR, "result_12_LLaVA-CoT.csv"), index=False)
 print(result.T)
 
 # Luu predictions de debug
-pd.DataFrame({"gold": gold_n, "pred": preds, "raw": preds_raw}).to_csv("preds_12_LLaVA-CoT.csv", index=False)
+pd.DataFrame({"gold": gold_n, "pred": preds, "ans_raw": preds_ans, "raw": preds_raw}).to_csv("preds_12_LLaVA-CoT.csv", index=False)
 print("\nSaved: result_12_LLaVA-CoT.csv, preds_12_LLaVA-CoT.csv")
 print("=> Chay xong: lay cac gia tri Acc/Prec/Recall/F1/FPR/FNR/Train Time/Params/Steps dien vao sheet 'Implement' dong 12.")

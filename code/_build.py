@@ -117,7 +117,7 @@ CONFIGS = {
         "dataset_sources": ["lyte69/gqa-images"],
         "kernel_sources": ["khoangoo/test-dataset-visual-cot"],
     },
-    # "15": {...}  -- them sau
+    # "15": {...}  -- them sau (NOTE: #15 LLM4SGG KHONG nam trong scope - user 2026-08-06)
 }
 
 def build(num, force_smoke=True):
